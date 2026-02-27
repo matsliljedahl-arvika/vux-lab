@@ -1,0 +1,513 @@
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { 
+  Play, 
+  Square, 
+  RotateCcw, 
+  AlertTriangle, 
+  Settings, 
+  Wrench, 
+  Activity, 
+  Cast, 
+  Users, 
+  Laptop,
+  ArrowLeft
+} from 'lucide-react';
+
+/**
+ * AUTO-FILLER PRO V2.6
+ * En industriell simulering för utbildning inom automation och felsökning.
+ */
+
+const App = () => {
+  // --- KONFIGURATION ---
+  const COMPONENT_IDS = {
+    MOTOR: "M-101",
+    SENSOR_FILL: "B-201",
+    VALVE: "Y-301",
+    SENSOR_LEVEL: "B-401"
+  };
+
+  const FILL_SPEED = 0.8;
+  const BELT_SPEED = 0.5;
+  const BOTTLE_SPAWN_RATE = 200;
+  const SENSOR_POSITION = 50;
+
+  // --- APP STATE ---
+  const [appMode, setAppMode] = useState('menu'); // 'menu', 'teacher', 'student'
+  const broadcastChannelRef = useRef(null);
+
+  // --- SIMULATION STATE ---
+  const [isRunning, setIsRunning] = useState(false);
+  const [tankLevel, setTankLevel] = useState(100);
+  const [producedCount, setProducedCount] = useState(0);
+  const [bottles, setBottles] = useState([]);
+  const [activeFaults, setActiveFaults] = useState([]);
+  const [repairInput, setRepairInput] = useState("");
+  const [logMessage, setLogMessage] = useState("Systemet redo. Inga fel rapporterade.");
+
+  const [binaryState, setBinaryState] = useState({
+    motor: 0,
+    sensor: 0,
+    valve: 0,
+    tankLow: 0
+  });
+
+  const gameState = useRef({
+    bottles: [],
+    frameCount: 0,
+    tankLevel: 100,
+    producedCount: 0,
+    isRunning: false,
+    faults: {
+      motor: false,
+      sensor: false,
+      valve: false,
+      level: false
+    }
+  });
+
+  const requestRef = useRef();
+
+  // --- KOMMUNIKATION ---
+  useEffect(() => {
+    const channel = new BroadcastChannel('automation_classroom_channel');
+    broadcastChannelRef.current = channel;
+
+    channel.onmessage = (event) => {
+      const data = event.data;
+      if (appMode === 'student' && data.type === 'FAULT_TRIGGER') {
+        applyFault(data.componentType, true);
+      }
+      if (appMode === 'teacher' && data.type === 'SYSTEM_STATUS') {
+        setIsRunning(data.isRunning);
+      }
+    };
+
+    return () => channel.close();
+  }, [appMode]);
+
+  const sendCommandToStudent = (componentType) => {
+    if (broadcastChannelRef.current) {
+      broadcastChannelRef.current.postMessage({
+        type: 'FAULT_TRIGGER',
+        componentType: componentType
+      });
+      setLogMessage(`KOMMANDO SKICKAT: Fel simulerat på ${componentType}`);
+    }
+  };
+
+  // --- LOGIK ---
+  const toggleSystem = () => {
+    const newState = !isRunning;
+    setIsRunning(newState);
+    gameState.current.isRunning = newState;
+    
+    if (appMode === 'student' && broadcastChannelRef.current) {
+       broadcastChannelRef.current.postMessage({ type: 'SYSTEM_STATUS', isRunning: newState });
+    }
+  };
+
+  const resetSystem = () => {
+    setIsRunning(false);
+    setProducedCount(0);
+    setTankLevel(100);
+    setBottles([]);
+    setBinaryState({ motor: 0, sensor: 0, valve: 0, tankLow: 0 });
+    gameState.current = {
+      ...gameState.current,
+      bottles: [],
+      frameCount: 0,
+      tankLevel: 100,
+      producedCount: 0,
+      isRunning: false,
+      faults: { motor: false, sensor: false, valve: false, level: false }
+    };
+    setLogMessage("System återställt.");
+    setActiveFaults([]);
+  };
+
+  const applyFault = (componentType, isRemote = false) => {
+    const state = gameState.current;
+    let faultCode = "";
+    
+    switch(componentType) {
+      case 'MOTOR': state.faults.motor = true; faultCode = COMPONENT_IDS.MOTOR; break;
+      case 'SENSOR': state.faults.sensor = true; faultCode = COMPONENT_IDS.SENSOR_FILL; break;
+      case 'VALVE': state.faults.valve = true; faultCode = COMPONENT_IDS.VALVE; break;
+      case 'LEVEL': state.faults.level = true; faultCode = COMPONENT_IDS.SENSOR_LEVEL; break;
+      default: break;
+    }
+
+    setActiveFaults(prev => [...new Set([...prev, faultCode])]);
+    setLogMessage(isRemote ? `VARNING: Fjärrstyrt fel på ${faultCode}!` : `VARNING: Lokalt fel aktiverat.`);
+  };
+
+  const performMaintenance = (e) => {
+    e.preventDefault();
+    if (isRunning) {
+        setLogMessage("SÄKERHETSFEL: Stoppa maskinen före underhåll!");
+        return;
+    }
+    const componentId = repairInput.trim().toUpperCase();
+    const state = gameState.current;
+    let fixed = false;
+
+    if (componentId === COMPONENT_IDS.MOTOR && state.faults.motor) { state.faults.motor = false; fixed = true; }
+    else if (componentId === COMPONENT_IDS.SENSOR_FILL && state.faults.sensor) { state.faults.sensor = false; fixed = true; }
+    else if (componentId === COMPONENT_IDS.VALVE && state.faults.valve) { state.faults.valve = false; fixed = true; }
+    else if (componentId === COMPONENT_IDS.SENSOR_LEVEL && state.faults.level) { state.faults.level = false; fixed = true; }
+
+    if (fixed) {
+        setLogMessage(`ÅTGÄRDAD: ${componentId} fungerar nu normalt.`);
+        setActiveFaults(prev => prev.filter(id => id !== componentId));
+        setRepairInput("");
+    } else {
+        setLogMessage(Object.values(COMPONENT_IDS).includes(componentId) ? `INFO: Inget fel på ${componentId}.` : "FEL: Ogiltigt ID.");
+    }
+  };
+
+  const animate = useCallback(() => {
+    if (gameState.current.isRunning && appMode !== 'teacher') {
+      const state = gameState.current;
+
+      // 1. Nivåövervakning
+      const effectiveTankLevel = state.faults.level ? 0 : state.tankLevel;
+      if (effectiveTankLevel <= 0) {
+        state.isRunning = false;
+        setIsRunning(false);
+        setLogMessage(state.faults.level ? "KRITISKT FEL: Givare B-401 signalförlust." : "STOPP: Tank tom.");
+        return;
+      }
+
+      // 2. Spawn
+      state.frameCount++;
+      if (state.frameCount % BOTTLE_SPAWN_RATE === 0) {
+        if (!state.bottles.some(b => b.x < 15)) {
+          state.bottles.push({ id: Date.now(), x: -10, fill: 0, status: 'moving' });
+        }
+      }
+
+      // 3. Simulation
+      let sensorSignal = false;
+      let valveOutput = false;
+      let beltSpeed = state.faults.motor ? 0 : BELT_SPEED;
+
+      state.bottles.forEach(bottle => {
+        const atSensor = bottle.x >= SENSOR_POSITION - 2 && bottle.x <= SENSOR_POSITION + 2;
+        const detected = atSensor && !state.faults.sensor;
+
+        if (detected) sensorSignal = true;
+
+        if (detected && bottle.fill < 100) {
+            beltSpeed = 0;
+            if (!state.faults.valve) {
+                valveOutput = true;
+                bottle.status = 'filling';
+                bottle.x = SENSOR_POSITION;
+                bottle.fill += FILL_SPEED;
+                state.tankLevel = Math.max(0, state.tankLevel - (FILL_SPEED / 6));
+                if (bottle.fill >= 100) {
+                    bottle.fill = 100;
+                    bottle.status = 'done';
+                }
+            } else {
+                valveOutput = true; 
+                bottle.status = 'waiting';
+            }
+        } else {
+            if (bottle.status !== 'filling' && bottle.status !== 'waiting') {
+                bottle.x += beltSpeed;
+                bottle.status = 'moving';
+            }
+        }
+      });
+
+      // 4. Output
+      const finished = state.bottles.filter(b => b.x > 110);
+      if (finished.length > 0) {
+        state.producedCount += finished.length;
+        state.bottles = state.bottles.filter(b => b.x <= 110);
+      }
+
+      setBottles([...state.bottles]);
+      setTankLevel(state.tankLevel);
+      setProducedCount(state.producedCount);
+      setBinaryState({
+        motor: isRunning && !state.faults.motor ? 1 : 0,
+        sensor: sensorSignal ? 1 : 0,
+        valve: valveOutput ? 1 : 0,
+        tankLow: effectiveTankLevel < 20 ? 1 : 0
+      });
+    }
+    requestRef.current = requestAnimationFrame(animate);
+  }, [isRunning, appMode]);
+
+  useEffect(() => {
+    requestRef.current = requestAnimationFrame(animate);
+    return () => cancelAnimationFrame(requestRef.current);
+  }, [animate]);
+
+  // --- RENDER MENU ---
+  if (appMode === 'menu') {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-screen bg-slate-950 text-white font-sans p-6">
+        <div className="text-center mb-12">
+          <h1 className="text-4xl font-black text-blue-500 tracking-tighter mb-2">AUTO-FILLER PRO</h1>
+          <p className="text-slate-500 font-mono text-sm uppercase tracking-widest">Industrial Training System v2.6</p>
+        </div>
+        
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 w-full max-w-2xl">
+          <button onClick={() => setAppMode('student')} className="group p-8 bg-slate-900 border border-slate-800 rounded-2xl hover:border-green-500 transition-all text-left shadow-2xl">
+            <Users size={48} className="text-green-500 mb-4 group-hover:scale-110 transition-transform"/>
+            <h2 className="text-2xl font-bold mb-2">Elev-läge</h2>
+            <p className="text-slate-400 text-sm leading-relaxed">Övervaka processen, logga data och utför reparationer när fel uppstår.</p>
+          </button>
+
+          <button onClick={() => setAppMode('teacher')} className="group p-8 bg-slate-900 border border-slate-800 rounded-2xl hover:border-blue-500 transition-all text-left shadow-2xl">
+            <Cast size={48} className="text-blue-500 mb-4 group-hover:scale-110 transition-transform"/>
+            <h2 className="text-2xl font-bold mb-2">Lärar-konsol</h2>
+            <p className="text-slate-400 text-sm leading-relaxed">Simulera komponentfel trådlöst och följ elevernas felsökningsarbete.</p>
+          </button>
+        </div>
+
+        <p className="mt-16 text-[10px] text-slate-600 uppercase tracking-widest text-center max-w-sm">
+          Fungerar mellan flikar i samma webbläsare. Öppna en flik som Lärare och en som Elev för att testa.
+        </p>
+      </div>
+    );
+  }
+
+  // --- RENDER TEACHER ---
+  if (appMode === 'teacher') {
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-200 font-mono p-4 md:p-8">
+        <div className="max-w-4xl mx-auto">
+          <header className="flex justify-between items-center mb-12 border-b border-slate-800 pb-6">
+            <div className="flex items-center gap-4">
+              <div className="p-3 bg-blue-500/10 rounded-lg"><Cast className="text-blue-500" /></div>
+              <h1 className="text-2xl font-black tracking-tight uppercase">Control Center</h1>
+            </div>
+            <button onClick={() => setAppMode('menu')} className="flex items-center gap-2 text-xs font-bold text-slate-500 hover:text-white transition-colors bg-slate-900 px-4 py-2 rounded-full">
+              <ArrowLeft size={14}/> STÄNG SESSION
+            </button>
+          </header>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div className="bg-slate-900 border border-slate-800 p-8 rounded-3xl shadow-xl">
+              <h2 className="text-lg font-bold text-white mb-6 flex items-center gap-3">
+                <AlertTriangle className="text-orange-500" size={20}/> TRIGGER FAULTS
+              </h2>
+              <div className="space-y-4">
+                {[
+                  { id: 'SENSOR', label: 'Blockera Fotocell', desc: 'Flaskan upptäcks ej vid påfyllning', component: COMPONENT_IDS.SENSOR_FILL },
+                  { id: 'VALVE', label: 'Ventilfel', desc: 'Ventilen fastnar i stängt läge', component: COMPONENT_IDS.VALVE },
+                  { id: 'MOTOR', label: 'Motoravbrott', desc: 'Transportbandet tappar drivning', component: COMPONENT_IDS.MOTOR },
+                  { id: 'LEVEL', label: 'Givarfel Tank', desc: 'Signalförlust från nivågivare', component: COMPONENT_IDS.SENSOR_LEVEL }
+                ].map(fault => (
+                  <button 
+                    key={fault.id}
+                    onClick={() => sendCommandToStudent(fault.id)}
+                    className="w-full bg-slate-950 border border-slate-800 p-4 rounded-xl text-left hover:border-red-500/50 hover:bg-red-500/5 transition-all group"
+                  >
+                    <div className="flex justify-between items-center mb-1">
+                      <span className="font-bold text-sm group-hover:text-red-400">{fault.label}</span>
+                      <span className="text-[10px] bg-slate-800 px-2 py-0.5 rounded text-slate-500">{fault.component}</span>
+                    </div>
+                    <p className="text-[11px] text-slate-600 italic leading-snug">{fault.desc}</p>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-6">
+              <div className="bg-slate-900 border border-slate-800 p-8 rounded-3xl shadow-xl flex-grow font-mono">
+                <h2 className="text-lg font-bold text-white mb-6 flex items-center gap-3">
+                  <Activity className="text-blue-500" size={20}/> LIVE FEED
+                </h2>
+                <div className="bg-black/40 p-4 rounded-xl text-xs space-y-3 min-h-[200px]">
+                  <div className="text-blue-400">{'>'} Monitoring remote session...</div>
+                  <div className="text-slate-500">{'>'} {logMessage}</div>
+                  {isRunning && <div className="text-green-500 animate-pulse font-bold">{'>'} CLIENT_STATE: RUNNING</div>}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // --- RENDER STUDENT ---
+  return (
+    <div className="flex flex-col lg:flex-row min-h-screen bg-slate-950 text-slate-100 font-sans overflow-hidden">
+      {/* MAIN VIEWPORT */}
+      <div className="flex-1 flex flex-col p-4 md:p-6 space-y-6">
+        <header className="flex justify-between items-start">
+          <div>
+            <h1 className="text-2xl font-black text-white tracking-tight">AUTO-FILLER PRO <span className="text-blue-500">V2.6</span></h1>
+            <div className="flex items-center gap-2 text-[10px] text-slate-500 font-mono mt-1">
+              <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
+              CONNECTED TO PLC_B_MODBUS
+            </div>
+          </div>
+          <div className="flex flex-col items-end gap-3">
+            <div className={`px-4 py-1.5 rounded-full text-[10px] font-black border transition-all ${activeFaults.length > 0 ? 'bg-red-500/20 text-red-400 border-red-500/50 animate-pulse' : 'bg-green-500/20 text-green-400 border-green-500/50'}`}>
+              {activeFaults.length > 0 ? 'SYSTEM FAULT DETECTED' : 'SYSTEM HEALTH: OPTIMAL'}
+            </div>
+            <button onClick={() => setAppMode('menu')} className="text-[10px] text-slate-600 hover:text-white uppercase font-bold tracking-widest transition-colors">Meny</button>
+          </div>
+        </header>
+
+        {/* SIMULATION CONTAINER */}
+        <div className="relative flex-grow bg-slate-900 border border-slate-800 rounded-[2rem] shadow-inner overflow-hidden min-h-[450px]">
+          {/* TANK SYSTEM */}
+          <div className="absolute top-10 left-1/2 -translate-x-1/2 flex flex-col items-center">
+             <div className="w-48 h-56 bg-slate-800 border-4 border-slate-700 rounded-3xl relative overflow-hidden shadow-2xl">
+                <div 
+                  className={`absolute bottom-0 left-0 w-full transition-all duration-300 ${activeFaults.includes(COMPONENT_IDS.SENSOR_LEVEL) ? 'bg-slate-700' : tankLevel < 20 ? 'bg-red-500' : 'bg-blue-600'}`}
+                  style={{ height: `${activeFaults.includes(COMPONENT_IDS.SENSOR_LEVEL) ? 0 : tankLevel}%` }}
+                >
+                  <div className="absolute top-0 w-full h-1 bg-white/20"></div>
+                </div>
+                {/* Scale */}
+                <div className="absolute inset-y-0 right-2 flex flex-col justify-between py-4 text-[9px] font-mono text-slate-500 opacity-50">
+                  <span>100</span><span>75</span><span>50</span><span>25</span><span>0</span>
+                </div>
+             </div>
+             {/* Pipe & Valve */}
+             <div className="w-8 h-12 bg-slate-700 relative">
+                <div className={`absolute -right-16 top-0 bg-slate-800 border border-slate-700 p-2 rounded text-[10px] font-mono whitespace-nowrap ${binaryState.valve ? 'border-blue-500 text-blue-400' : ''}`}>
+                  {COMPONENT_IDS.VALVE}
+                </div>
+                <div className={`absolute top-2 w-12 h-12 -left-2 bg-slate-900 border-2 rounded-xl flex items-center justify-center transition-all ${binaryState.valve ? 'border-blue-500 shadow-[0_0_15px_rgba(59,130,246,0.5)]' : 'border-slate-700'}`}>
+                   <Settings className={`text-slate-500 ${binaryState.valve ? 'animate-spin text-blue-400' : ''}`} size={24}/>
+                </div>
+             </div>
+             <div className="w-4 h-12 bg-slate-800"></div>
+          </div>
+
+          {/* BELT SYSTEM */}
+          <div className="absolute bottom-24 w-full h-32 bg-slate-800 border-t-4 border-slate-700 shadow-[0_-20px_50px_rgba(0,0,0,0.3)]">
+             <div className={`absolute inset-0 opacity-20 ${binaryState.motor ? 'animate-belt' : ''}`} 
+                  style={{ background: 'repeating-linear-gradient(90deg, #fff 0px, #fff 2px, transparent 2px, transparent 60px)' }}></div>
+             
+             {/* Motor Visual */}
+             <div className="absolute left-10 -top-6 bg-slate-900 border border-slate-700 p-3 rounded-2xl flex gap-3 items-center">
+                <div className={`w-10 h-10 rounded-full border-4 border-slate-800 flex items-center justify-center ${binaryState.motor ? 'animate-spin' : ''}`}>
+                   <div className="w-1 h-8 bg-blue-500 rounded-full"></div>
+                </div>
+                <div className="text-[10px] font-mono font-bold leading-none">
+                  <div className="text-slate-500 uppercase mb-1">Motor</div>
+                  <div className="text-white">{COMPONENT_IDS.MOTOR}</div>
+                </div>
+             </div>
+          </div>
+
+          {/* BOTTLES */}
+          {bottles.map(bottle => (
+            <div key={bottle.id} className="absolute bottom-28 w-16 h-28 transition-all" style={{ left: `${bottle.x}%`, transform: 'translateX(-50%)' }}>
+               <div className="w-full h-full border-2 border-white/20 bg-white/5 rounded-t-3xl rounded-b-xl relative overflow-hidden backdrop-blur-sm shadow-xl">
+                  <div className={`absolute bottom-0 w-full transition-all duration-100 ${bottle.fill >= 100 ? 'bg-green-500' : 'bg-blue-500/80'}`} style={{ height: `${bottle.fill}%` }}></div>
+                  <div className="absolute inset-0 flex items-center justify-center">
+                     {bottle.fill >= 100 && <span className="bg-white/10 px-2 py-0.5 rounded text-[8px] font-bold text-green-300">FILLED</span>}
+                  </div>
+               </div>
+            </div>
+          ))}
+
+          {/* SENSOR B-201 */}
+          <div className="absolute bottom-44 left-1/2 ml-14 -translate-x-1/2 flex flex-col items-center">
+            <div className={`w-6 h-6 rounded-lg border-2 mb-2 transition-all ${binaryState.sensor ? 'bg-yellow-500 border-yellow-300 shadow-[0_0_20px_yellow]' : 'bg-slate-900 border-slate-700'}`}></div>
+            <div className="h-40 w-0.5 bg-yellow-500/10 border-l border-dashed border-yellow-500/30"></div>
+            <div className="absolute -top-10 left-8 bg-slate-800 border border-slate-700 p-1.5 rounded text-[9px] font-mono">
+              {COMPONENT_IDS.SENSOR_FILL}
+            </div>
+          </div>
+        </div>
+
+        {/* CONTROLS */}
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+           <button onClick={toggleSystem} className={`col-span-2 py-6 rounded-3xl font-black text-xl flex items-center justify-center gap-4 shadow-lg transition-all active:scale-95 ${isRunning ? 'bg-red-600 hover:bg-red-500' : 'bg-green-600 hover:bg-green-500'}`}>
+             {isRunning ? <Square fill="currentColor" size={24}/> : <Play fill="currentColor" size={24}/>}
+             {isRunning ? 'SYSTEM EMERGENCY STOP' : 'SYSTEM MASTER START'}
+           </button>
+           <button onClick={() => { gameState.current.tankLevel = 100; setTankLevel(100); }} className="bg-slate-800 hover:bg-slate-700 py-6 rounded-3xl flex flex-col items-center justify-center gap-2 font-bold text-xs transition-colors">
+              <RotateCcw size={20}/> REFILL TANK
+           </button>
+           <button onClick={resetSystem} className="bg-slate-800 hover:bg-slate-700 py-6 rounded-3xl flex flex-col items-center justify-center gap-2 font-bold text-xs transition-colors">
+              <RotateCcw size={20} className="text-blue-500"/> TOTAL RESET
+           </button>
+        </div>
+      </div>
+
+      {/* SIDEBAR */}
+      <div className="w-full lg:w-96 bg-slate-900 border-l border-slate-800 p-6 flex flex-col gap-6 overflow-y-auto">
+        {/* LOG SECTION */}
+        <div className="bg-slate-950 p-6 rounded-[2rem] border border-slate-800 shadow-xl">
+           <h3 className="text-xs font-black text-slate-500 uppercase tracking-widest mb-4 flex items-center gap-2">
+              <Wrench size={14}/> Maintenance Log
+           </h3>
+           <div className="bg-black/50 p-4 rounded-2xl h-24 overflow-y-auto font-mono text-[11px] text-green-500 border border-white/5 mb-4">
+              {'>'} {logMessage}
+           </div>
+           <form onSubmit={performMaintenance} className="space-y-3">
+              <input 
+                type="text"
+                placeholder="COMPONENT ID (E.G. M-101)"
+                value={repairInput}
+                onChange={(e) => setRepairInput(e.target.value.toUpperCase())}
+                className="w-full bg-slate-900 border border-slate-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-blue-500 transition-colors uppercase font-mono"
+              />
+              <button type="submit" className="w-full bg-blue-600 hover:bg-blue-500 py-3 rounded-xl font-bold text-sm transition-colors shadow-lg shadow-blue-500/10">
+                EXECUTE COMPONENT SWAP
+              </button>
+           </form>
+        </div>
+
+        {/* PLC MONITOR */}
+        <div className="bg-slate-950 p-6 rounded-[2rem] border border-slate-800 shadow-xl flex-grow">
+           <h3 className="text-xs font-black text-slate-500 uppercase tracking-widest mb-6 flex items-center gap-2">
+              <Activity size={14}/> PLC I/O Dashboard
+           </h3>
+           <div className="space-y-3 font-mono">
+              <div className="text-[10px] text-slate-600 mb-2 font-bold">DISCRETE INPUTS</div>
+              <PLCRow label={`I:0/0 (${COMPONENT_IDS.SENSOR_FILL})`} value={binaryState.sensor} color="text-yellow-400" />
+              <PLCRow label={`I:0/1 (${COMPONENT_IDS.SENSOR_LEVEL})`} value={binaryState.tankLow} color="text-red-500" />
+              
+              <div className="text-[10px] text-slate-600 mb-2 mt-6 font-bold uppercase">Discrete Outputs</div>
+              <PLCRow label={`O:0/0 (${COMPONENT_IDS.MOTOR})`} value={binaryState.motor} color="text-green-500" />
+              <PLCRow label={`O:0/1 (${COMPONENT_IDS.VALVE})`} value={binaryState.valve} color="text-blue-500" />
+           </div>
+
+           <div className="mt-8 pt-8 border-t border-slate-800">
+              <div className="flex justify-between items-end">
+                <div className="text-slate-600 text-[10px] uppercase font-bold tracking-tighter">Total Production</div>
+                <div className="text-4xl font-black text-white leading-none">{producedCount}</div>
+              </div>
+           </div>
+        </div>
+      </div>
+
+      <style>{`
+        @keyframes belt {
+          0% { background-position: 0 0; }
+          100% { background-position: 60px 0; }
+        }
+        .animate-belt {
+          animation: belt 0.8s linear infinite;
+        }
+      `}</style>
+    </div>
+  );
+};
+
+const PLCRow = ({ label, value, color }) => (
+  <div className="bg-slate-900/50 p-3 rounded-xl flex justify-between items-center border border-white/5">
+    <span className="text-[11px] text-slate-400">{label}</span>
+    <span className={`text-sm font-black ${value ? color : 'text-slate-800'}`}>
+      {value ? 'TRUE' : 'FALSE'}
+    </span>
+  </div>
+);
+
+export default App;
